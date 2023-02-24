@@ -1,8 +1,7 @@
 import { H, Element } from '../types'
 import { m } from '@unified-latex/unified-latex-builder'
-import { all } from '../all'
 
-export function footnote(h: H, node: Element) {
+export function footnoteReference(h: H, node: Element) {
   if (node?.attributes?.type === 'separator') {
     return
   }
@@ -12,6 +11,5 @@ export function footnote(h: H, node: Element) {
     return
   }
 
-  h.footnotes[index] = all(h, node) ?? []
-  return
+  return m('footnote', h.footnotes[index])
 }

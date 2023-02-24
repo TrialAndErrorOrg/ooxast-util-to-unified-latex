@@ -12,6 +12,6 @@ export function footnote(h: H, node: Element) {
     return
   }
 
-  h.footnotes[index] = all(h, node) ?? []
+  h.endnotes[index] = all(h, node) ?? []
   return
 }
