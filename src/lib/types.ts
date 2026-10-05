@@ -9,8 +9,9 @@ import {
   EnvInfo,
 } from '@unified-latex/unified-latex-types'
 
-import { Attributes as OoxastProperties, Parent, Body, Text, Root, P } from 'ooxast'
+import { Attributes as OoxastProperties, Parent, Body, Text, Root, P, R, RPr, RPrMap } from 'ooxast'
 import { ListNumbering } from './util/find-list-numbering.js'
+import type { StyleNames } from './util/style-names.js'
 
 export type XastContent = Root['children'][number] | Root
 
@@ -21,12 +22,59 @@ export type Node = Parent['children'][number] | Root
 
 export type Attributes = OoxastProperties
 
+export type ParagraphHandler = (
+  h: H,
+  node: P,
+  {
+    styleName,
+    previousElement,
+    alreadyProcessedBody,
+    body,
+  }: {
+    styleName?: string
+    previousElement?: Element
+    alreadyProcessedBody: UnifiedLatexNode[]
+    body: Body
+  },
+) => UnifiedLatexNode | Array<UnifiedLatexNode> | void
+
+/**
+ * A function which returns true if the handler should be used for the paragraph
+ */
+export type ParagraphMatcher = (
+  paragraph: P,
+  style?: string,
+  h?: H,
+) => boolean | undefined | null | void
+
 export interface Options {
+  /**
+   * Handlers for specific formatting styles, e.g what to do when a run has the "Bold" style
+   *
+   * Provide an object with the name of the style as the key and a function as the value.
+   *
+   * Don't include the `w:` prefix, e.g. `w:b` should be `b`
+   */
+  formattingHandlers?: FormattingHandlers
   /** Handlers for specific node types */
   handlers?: { [handle: string]: Handle }
   /**
+   * Handlers for specific paragraph styles, e.g what to do when a paragraph has the "Heading 1" style
+   *
+   * You get access to the previous node, the current paragraph, the style of the paragraph (if any), the body, and the already processed body
+   *
+   * Provide an array of handlers to run them in order.
+   * You specify the handler and the matcher, which can be a string, an array of strings, or a function which returns a truthy value if the handler should be used.
+   *
+   * By default there are handlers for lists and headings.
+   */
+  paragraphHandlers?: Array<{
+    handler: ParagraphHandler
+    matcher: ParagraphMatcher | string | string[]
+  }>
+  /**
    * Whether to add a preamble and document environment
-   * 
+   *
    * @default true
    */
   document?: boolean
@@ -195,6 +243,16 @@ export interface Options {
    * ```
    */
   preamble?: UnifiedLatexNode[] | string
+
+  /**
+   * What to do with citations
+   *
+   * - `plain`: Just output the citation as plain text
+   * - `cite`: Use the `\cite` or equiv commands
+   *
+   * @default 'cite'
+   */
+  citations?: 'plain' | 'cite'
 }
 
 export type Handle = (
@@ -203,7 +261,48 @@ export type Handle = (
   parent?: Parent,
 ) => UnifiedLatexNode | Array<UnifiedLatexNode> | void | undefined
 
+export type RProps<N extends RChildNamesWithoutW = RChildNamesWithoutW> = NonNullable<
+  RPrMap[N]
+>[number]['attributes']
+
+export type FormattingHandler<T extends RProps> = (
+  h: H,
+  text: UnifiedLatexNode | UnifiedLatexNode[],
+  prop: T,
+  node: R,
+) => UnifiedLatexNode | UnifiedLatexNode[]
+
+type RChildNamesWithoutW = RPr['children'][number]['name'] extends `w:${infer T}`
+  ? T
+  : { 'w:val': string }
+
+export type FormattingHandlers = {
+  [K in RChildNamesWithoutW]?: FormattingHandler<RProps<K>>
+}
+
 export interface Context {
+  /**
+   * Handlers for specific formatting styles, e.g what to do when a run has the "Bold" style
+   *
+   * Provide an object with the name of the style as the key and a function as the value.
+   *
+   * Don't include the `w:` prefix, e.g. `w:b` should be `b`
+   */
+  formattingHandlers: FormattingHandlers
+  /**
+   * Handlers for specific paragraph styles, e.g what to do when a paragraph has the "Heading 1" style
+   *
+   * You get access to the previous node, the current paragraph, the style of the paragraph (if any), the body, and the already processed body
+   *
+   * Provide an array of handlers to run them in order.
+   * You specify the handler and the matcher, which can be a string, an array of strings, or a function which returns a truthy value if the handler should be used.
+   *
+   * By default there are handlers for lists and headings.
+   */
+  paragraphHandlers: Array<{
+    handler: ParagraphHandler
+    matcher: ParagraphMatcher | string | string[]
+  }>
   nodeById?: {
     [id: string]: Parent
   }
@@ -273,12 +372,26 @@ export interface Context {
    * */
   simpleParagraph: boolean
   /**
+   * Whether a drawing may become a `figure` environment: true while converting a body
+   * paragraph that holds nothing but the drawing. Elsewhere (running text, links, headings,
+   * tables, lists, notes) a drawing is an inline `\includegraphics`.
+   */
+  blockDrawing?: boolean
+  /**
    * A bibliography you can add manually
    *
    * Needs to be in CSL format, which will be converted to BibTeX, or in BibTeX format
    */
   bibliography?: CSL[] | string
   listNumbering?: ListNumbering
+  /**
+   * Paragraph style ids mapped to their names, from `word/styles.xml`
+   */
+  styleNames: StyleNames
+  /**
+   * What to do with citations: `plain` keeps the text Word shows, `cite` makes `\cite`s
+   */
+  citations: 'plain' | 'cite'
 }
 
 export type HWithProps = (

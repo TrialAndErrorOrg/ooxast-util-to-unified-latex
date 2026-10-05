@@ -1,11 +1,13 @@
 import { Color, FldChar, Highlight, R, RPr, Shd, VerticalAlignRun, Parent } from 'ooxast'
 import { select } from 'xast-util-select'
 import { all } from '../all.js'
+import { one } from '../one.js'
 import { H, UnifiedLatexNode } from '../types.js'
 import { Group, Macro, String as UnifiedLatexString } from '@unified-latex/unified-latex-types'
 import { convertElement } from 'xast-util-is-element'
-import { m, s } from '@unified-latex/unified-latex-builder'
+import { m, s, SP } from '@unified-latex/unified-latex-builder'
 import { citation } from './citation.js'
+import { getRStyle } from 'ooxast-util-get-style'
 
 //const isVert = convertElement<VerticalAlignRun>('w:vertAlign')
 
@@ -43,98 +45,99 @@ export function r(h: H, node: R, parent?: Parent) {
     return
   }
 
-  const props = select('w\\:rPr', node) as RPr
-  const mergedText = all(h, node).reduce((acc, curr) => {
-    if (curr.type !== 'string') return acc
-    acc = acc + curr.content
-    return acc
-  }, '')
+  const props = getRStyle(node)
+  const segments = runSegments(h, node)
 
-  const text = s(mergedText)
-  if (!props) return text
+  if (!segments.some(Boolean)) {
+    return props ? undefined : s('')
+  }
 
-  if (!mergedText) return
+  const formatted = segments.map((segment) => {
+    if (!segment) return []
+    const text = s(segment)
+    if (!props) return [text]
 
-  const formattedText = props.children.reduce((text, prop) => {
-    switch (prop.name.replace(/\w+:/, '')) {
-      case 'i':
-        text = m(h.italics, text)
-        return text
-      case 'b':
-        text = m(h.inMath ? 'mathbf' : 'textbf', text)
-        return text
-      case 'u':
-        text = m('underline', text)
-        return text
-      case 'strike':
-      case 'dstrike':
-        text = m(h.strikethrough, text)
-        return text
-      case 'vertAlign':
-        //if (!isVert(prop)) continue
-        // @ts-expect-error aaaa
-        if (prop.attributes['w:val'] === 'superscript') {
-          text = m('textsuperscript', text)
+    const formattedText = Object.entries(props).reduce(
+      (text, [name, prop]) => {
+        if (!prop || !('w:val' in prop) || isOff(prop['w:val'])) {
           return text
         }
-        // @ts-expect-error aaaa
-        if (prop.attributes['w:val'] === 'subscript') {
-          text = m('textsubscript', text)
-          return text
+
+        const tagName = name.replace(/\w+:/, '') as keyof typeof h.formattingHandlers
+        const handler = h.formattingHandlers[tagName]
+        if (handler) {
+          text = handler(
+            h,
+            text,
+            // @ts-expect-error TODO: Fix types for formattingHanlder
+            prop,
+            node,
+          )
         }
         return text
-      case 'smallCaps':
-        text = m('textsc', text)
-        return text
-      case 'highlight': {
-        if (!h.xcolor) {
-          return text
-        }
-        text = m('colorbox', [
-          (prop as Highlight).attributes['w:val'],
-          ...(Array.isArray(text) ? text : [text]),
-        ])
-        return text
+      },
+      text as UnifiedLatexNode | UnifiedLatexNode[],
+    )
+
+    return Array.isArray(formattedText) ? formattedText : [formattedText]
+  })
+
+  if (formatted.length === 1) {
+    const [only] = formatted
+    return only.length === 1 ? only[0] : only
+  }
+
+  // line breaks (`w:br`) inside the run: format each line on its own, `\newline` in between
+  return formatted.flatMap((nodes, index) =>
+    index === 0 ? nodes : h.inTable ? [s(' '), ...nodes] : [m('newline'), SP, ...nodes],
+  )
+}
+
+/**
+ * The text of a run, split at its line breaks.
+ *
+ * A run can hold several `w:t`s with `w:br` (line break), `w:cr` and `w:tab` in between
+ * (`ooxast-util-remove-rsid` also merges runs that way). Page and column breaks are dropped, a
+ * tab becomes a space.
+ */
+function runSegments(h: H, node: R): string[] {
+  const segments = ['']
+
+  for (const child of node.children ?? []) {
+    if (child.type === 'element') {
+      const name = child.name.replace(/\w+:/, '')
+      if (name === 'rPr') continue
+      if (name === 'br' || name === 'cr') {
+        const type = (child as { attributes?: Record<string, string> }).attributes?.['w:type']
+        if (type === 'page' || type === 'column') continue
+        segments.push('')
+        continue
       }
-      case 'color': {
-        if (!h.xcolor) {
-          return text
-        }
-        const color = (prop as Color).attributes['w:val']
-
-        if (color === 'auto' || color === '000000') {
-          return text
-        }
-        text = {
-          type: 'group',
-          content: [m('color', color), [...(Array.isArray(text) ? text : [text])]],
-        } as Group
-        return text
+      if (name === 'tab') {
+        segments[segments.length - 1] += ' '
+        continue
       }
-      case 'bdr': {
-        if (h.inMath) {
-          return text
-        }
-        text = m('fbox', text)
-        return text
-      }
-      case 'shd': {
-        if (h.inMath) {
-          return text
-        }
-
-        const shdColor = (prop as Shd).attributes['w:fill']
-
-        if (!shdColor || shdColor === 'auto' || shdColor === '000000') {
-          return text
-        }
-
-        text = m('colorbox', ['gray', ...(Array.isArray(text) ? text : [text])])
-        return text
-      }
-      default:
-        return text
     }
-  }, text as UnifiedLatexNode | UnifiedLatexNode[])
-  return formattedText
+
+    const result = one(h, child as any, node as any)
+    for (const res of Array.isArray(result) ? result : result ? [result] : []) {
+      if (res.type === 'string') {
+        segments[segments.length - 1] += res.content
+      }
+    }
+  }
+
+  return segments
+}
+
+/**
+ * Whether a run property is switched off.
+ *
+ * Toggle properties (`w:b`, `w:i`, `w:strike`…) are `ST_OnOff`: `<w:b w:val="0"/>`,
+ * `"false"` and `"off"` all mean *not bold*. Google Docs exports write `w:val="false"`.
+ * `w:u w:val="none"` means no underline.
+ */
+export function isOff(val: unknown) {
+  if (val === undefined || val === null || val === '' || val === false) return true
+  return ['0', 'false', 'off', 'none'].includes(String(val).toLowerCase())
 }

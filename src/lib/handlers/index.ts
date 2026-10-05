@@ -16,6 +16,8 @@ import { oMathPara } from './oMathPara.js'
 import { tc } from './tc.js'
 import { footnoteReference } from './footnoteReference.js'
 import { oMath } from './oMath.js'
+import { hyperlink } from './hyperlink.js'
+import { eqArr } from './eqArr.js'
 
 export const handlers: Context['handlers'] = {
   p,
@@ -24,10 +26,12 @@ export const handlers: Context['handlers'] = {
   text,
   document: all,
   footnotes: all,
+  hyperlink,
   footnote,
   t: all,
   oMathPara: oMathPara,
   oMath,
+  eqArr,
   r,
   instrText: citation,
   tbl,
@@ -38,6 +42,11 @@ export const handlers: Context['handlers'] = {
   instruction: ignore,
   doctype: ignore,
   drawing,
+  // tracked changes: deleted and moved-away text is not part of the document
+  del: ignore,
+  moveFrom: ignore,
+  delText: ignore,
+  delInstrText: ignore,
   footnoteReference,
   endNoteReference: footnoteReference,
 }

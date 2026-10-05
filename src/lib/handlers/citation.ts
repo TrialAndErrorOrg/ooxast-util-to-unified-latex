@@ -17,9 +17,12 @@ import { convertElement, isElement } from 'xast-util-is-element'
 import { s } from '@unified-latex/unified-latex-builder'
 
 export const citation: Handle = (h: H, citationNode: T, parent?: Parent) => {
-  // i const t = select('', citation) as T
-  //  if (!t) return
   if (!citationNode || !citationNode?.children?.length) return
+
+  // keep the field's displayed text instead of turning it into a \cite
+  if (h.citations === 'plain') {
+    return
+  }
 
   const text = citationNode.children[0].value
 
@@ -37,7 +40,6 @@ export const citation: Handle = (h: H, citationNode: T, parent?: Parent) => {
         console.log('Attemping to combine incomplete citation with new one...')
         citation = JSON.parse(h.partialCitation + json)
         console.log('Success!')
-        console.dir(citation, { depth: null })
         h.partialCitation = ''
       } else {
         citation = JSON.parse(json)
@@ -119,8 +121,8 @@ export const citation: Handle = (h: H, citationNode: T, parent?: Parent) => {
               ...(suffix
                 ? [arg(suffix.trim(), { braces: '[]' })]
                 : prefix
-                ? [arg('', { braces: '[]' })]
-                : []),
+                  ? [arg('', { braces: '[]' })]
+                  : []),
               arg(citeKey),
             ]
           }),
@@ -169,13 +171,27 @@ export const citation: Handle = (h: H, citationNode: T, parent?: Parent) => {
       const actualSuffix =
         maybeSuffix && maybeSuffix !== citationWithoutParens ? maybeSuffix : undefined
 
+      const mappedCitations = citations.flatMap(
+        ({ citeKey, prefix, suffix: literalSuffix, label, locator }) => {
+          const suffix = literalSuffix ?? `${label ? `${label} ` : ''}${locator ?? ''}`
+          return [
+            ...(prefix ? [arg(prefix.trim(), { braces: '[]' })] : []),
+            ...(suffix
+              ? [arg(suffix.trim(), { braces: '[]' })]
+              : prefix
+                ? [arg('', { braces: '[]' })]
+                : []),
+            arg(citeKey),
+          ]
+        },
+      )
+
       const args: Argument[] = [
         ...(actualPrefix ? [arg(actualPrefix, { braces: '[]' })] : []),
         ...(actualSuffix ? [arg(actualSuffix, { braces: '[]' })] : []),
-        arg(citations.join(', ')),
+        ...mappedCitations,
       ]
-
-      return m(formattedCitation.startsWith('(') ? 'textcite' : 'parencite', args)
+      return m(formattedCitation.startsWith('(') ? 'parencites' : 'textcites', args)
     }
   }
   // Endnote/Citavi citation
@@ -201,7 +217,17 @@ function generateAuthYearFromCSL(h: H, csl: CSL): string {
     csl,
   )
 }
-function makeUniqueSuffix(h: H, key: string, data: CSL) {
+/**
+ * Make a string usable as a biblatex entry key: no whitespace and none of `{}(),=#%\~"'`.
+ * Organisations as authors (`Wellcome Trust`, `R Core Team`) used to give keys with spaces,
+ * which biber can't parse.
+ */
+export function sanitizeCiteKey(key: string) {
+  return key.replace(/[\s{}(),=#%\\~"']+/g, '')
+}
+
+function makeUniqueSuffix(h: H, rawKey: string, data: CSL) {
+  let key = sanitizeCiteKey(rawKey) || `bib${h.citationNumber}`
   while (h.citeKeys[key] && h.citeKeys[key] !== data.title) {
     key = incrementSuffix(key)
   }

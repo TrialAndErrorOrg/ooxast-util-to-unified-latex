@@ -16,7 +16,7 @@ import {
   Text,
   RenderInfo,
 } from './types.js'
-import rehypeMinifyWhitespace from 'rehype-minify-whitespace'
+import { minifyWhitespace } from 'xast-util-minify-whitespace'
 
 import { arg, args, env, m, s } from '@unified-latex/unified-latex-builder'
 
@@ -27,12 +27,25 @@ import { cslToBiblatex } from 'csl-to-biblatex'
 import { VFile } from 'vfile'
 import { notes } from './util/notes.js'
 import { findListNumbering } from './util/find-list-numbering.js'
+// Types `file.data.parsed` / `relations` (the augmentation lives in docx-to-vfile).
+import type {} from 'docx-to-vfile'
+import { escapeLatex } from './util/escape.js'
+import { getStyleNames } from './util/style-names.js'
+import { listMatcher, listStyleHandler } from './handlers/paragraph/list.js'
+import { defaultFormattingHandlers } from './handlers/defaultFormattingHandlers.js'
 
 export { one } from './one.js'
 export { all } from './all.js'
 export { handlers as defaultHandlers }
 
-const defaultOptions: Options = {
+export const defaultParagraphHandlers: NonNullable<Options['paragraphHandlers']> = [
+  {
+    matcher: listMatcher,
+    handler: listStyleHandler,
+  },
+]
+
+export const defaultOptions: Options = {
   newLines: false,
   quotes: ['"'],
   topSection: 1,
@@ -48,15 +61,15 @@ const defaultOptions: Options = {
     'hyperref',
     { name: 'biblatex', options: ['backend=biber', 'style=apa'] },
   ],
+  paragraphHandlers: defaultParagraphHandlers,
+  formattingHandlers: defaultFormattingHandlers,
+  citations: 'cite',
 }
 
-declare module 'vfile' {
-  interface DataMap {
-    [key: `${string}.xml` | `${string}.rels`]: string | undefined
-    parsed: {
-      [key: `${string}.xml` | `${string}.rels`]: Root | undefined
-    }
-  }
+function preambleHasTitle(preamble: NonNullable<Options['preamble']>) {
+  return typeof preamble === 'string'
+    ? /\\title\b/.test(preamble)
+    : preamble.some((node) => node.type === 'macro' && node.content === 'title')
 }
 
 export function toUnifiedLatex(
@@ -73,6 +86,18 @@ export function toUnifiedLatex(
   const options = {
     ...defaultOptions,
     ...(optionsOrVFile instanceof VFile ? maybeOptions : optionsOrVFile),
+    paragraphHandlers: [
+      ...defaultParagraphHandlers,
+      ...(optionsOrVFile instanceof VFile
+        ? (maybeOptions?.paragraphHandlers ?? [])
+        : (optionsOrVFile?.paragraphHandlers ?? [])),
+    ],
+    formattingHandlers: {
+      ...defaultFormattingHandlers,
+      ...(optionsOrVFile instanceof VFile
+        ? (maybeOptions?.formattingHandlers ?? {})
+        : (optionsOrVFile?.formattingHandlers ?? {})),
+    },
   }
 
   const vfile = optionsOrVFile instanceof VFile ? optionsOrVFile : undefined
@@ -81,14 +106,9 @@ export function toUnifiedLatex(
     ? [vfile?.data?.parsed?.['word/footnotes.xml'], vfile?.data?.parsed?.['word/endnotes.xml']]
     : []
 
-  const whiteSpaceTransformer = rehypeMinifyWhitespace({
-    newlines: options.newLines === true,
-  })
+  const minifyOptions = { newlines: options.newLines === true }
 
-  if (whiteSpaceTransformer) {
-    // @ts-expect-error rehype-minify-whitespace is not typed correctly
-    whiteSpaceTransformer(tree)
-  }
+  minifyWhitespace(tree, minifyOptions)
 
   // const byId: { [s: string]: Element } = {}
   let unifiedLatex: UnifiedLatexNode | UnifiedLatexRoot
@@ -141,7 +161,7 @@ export function toUnifiedLatex(
       parseCitation: options.parseCitation || parseCitation,
       partialCitation: '',
       deleteNextRun: false,
-      relations: options.relations || {},
+      relations: vfile?.data?.relations?.document || {},
       citeKeys: {},
       citationType: options.citationType || 'mendeley',
       displayMath: options.displayMath || 'equation',
@@ -167,42 +187,54 @@ export function toUnifiedLatex(
       listNumbering: vfile?.data?.['word/numbering.xml']
         ? findListNumbering(vfile.data['word/numbering.xml'])
         : vfile?.data?.parsed?.['word/numbering.xml']
-        ? findListNumbering(vfile.data.parsed['word/numbering.xml'])
-        : undefined,
+          ? findListNumbering(vfile.data.parsed['word/numbering.xml'])
+          : undefined,
+      styleNames: getStyleNames(
+        vfile?.data?.['word/styles.xml'] ?? vfile?.data?.parsed?.['word/styles.xml'],
+      ),
+      paragraphHandlers: options.paragraphHandlers || defaultParagraphHandlers,
+      formattingHandlers: options.formattingHandlers || defaultFormattingHandlers,
+      citations: options.citations ?? 'cite',
     } as Context,
   )
 
   h.simpleParagraph = true
+  const ogRelations = h.relations
   if (unparsedFootnotes) {
-    //@ts-expect-error shhh
-    whiteSpaceTransformer!(unparsedFootnotes)
+    h.relations = vfile?.data?.relations?.footnotes || {}
+    minifyWhitespace(unparsedFootnotes, minifyOptions)
     h.footnotes = notes(h, unparsedFootnotes)
   }
 
   if (unparsedEndnotes) {
-    //@ts-expect-error shhh
-    whiteSpaceTransformer!(unparsedEndnotes)
+    h.relations = vfile?.data?.relations?.endnotes || {}
+    minifyWhitespace(unparsedEndnotes, minifyOptions)
     h.endnotes = notes(h, unparsedEndnotes)
   }
+
+  h.relations = ogRelations
+
   h.simpleParagraph = false
 
   const result = one(h, tree, undefined)
-
-  // if (!h.document) {
-  //   return result
-  // }
 
   if (!result) {
     return { type: 'root', content: [] } as UnifiedLatexRoot
   }
 
+  if (options.document === false) {
+    if (!Array.isArray(result) && result.type === 'root') {
+      return result as UnifiedLatexRoot
+    }
+    return { type: 'root', content: Array.isArray(result) ? result : [result] } as UnifiedLatexRoot
+  }
+
   unifiedLatex = env('document', result)
 
-  console.log({ bib: h.bibliography })
   const biblatex = h.bibliography
     ? Array.isArray(h.bibliography)
-      ? cslToBiblatex(h.bibliography)
-      : s(h.bibliography)
+      ? escapeLatex(cslToBiblatex(h.bibliography))
+      : s(escapeLatex(h.bibliography))
     : null
 
   const packages =
@@ -224,12 +256,20 @@ export function toUnifiedLatex(
         PB,
       ]) || []
 
-  const preamble = options.preamble ?? [
-    ...(h.title ? [PB, m('title', h.title), PB] : []),
-    ...(h.bibliography && h.bibliography.length
-      ? [PB, m('addbibresource', 'bibliography.bib'), PB]
-      : []),
-  ]
+  const title = h.title ? [PB, m('title', escapeLatex(h.title, { escapeBraces: true })), PB] : []
+  // a custom preamble replaces the default one, but keeps the title unless it sets its own
+  const customPreamble =
+    typeof options.preamble === 'string' ? [s(options.preamble)] : options.preamble
+  const preamble = customPreamble
+    ? options.preamble && preambleHasTitle(options.preamble)
+      ? customPreamble
+      : [...title, ...customPreamble]
+    : [
+        ...title,
+        ...(h.bibliography && h.bibliography.length
+          ? [PB, m('addbibresource', 'bibliography.bib'), PB]
+          : []),
+      ]
 
   unifiedLatex = {
     type: 'root',
@@ -244,7 +284,7 @@ export function toUnifiedLatex(
         : m('documentclass', h.documentClass.name),
       PB,
       ...packages,
-      ...(typeof preamble === 'string' ? [s(preamble)] : preamble),
+      ...preamble,
       ...(biblatex ? [env('filecontents', biblatex, arg('bibliography.bib'))] : []),
       PB,
       unifiedLatex,
@@ -255,7 +295,7 @@ export function toUnifiedLatex(
 
   /**
    * Collapse text nodes, and fix whitespace.
-   * Most of this is taken care of by `rehype-minify-whitespace`, but
+   * Most of this is taken care of by `xast-util-minify-whitespace`, but
    * we’re generating some whitespace too, and some nodes are in the end
    * ignored.
    * So clean up.
